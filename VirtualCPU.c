@@ -178,6 +178,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
 
     case VCPU_ADD: {
         uint8_t registers[3];
+        uint32_t sum;
         uint16_t result;
         if (!instructionFits(vcpu, 4)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
@@ -188,8 +189,15 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegisterOperands(registers, 3)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        result = vcpu->cpu.r[registers[1]] + vcpu->cpu.r[registers[2]];
+        sum = (uint32_t)vcpu->cpu.r[registers[1]] +
+            vcpu->cpu.r[registers[2]];
+        result = (uint16_t)sum;
         vcpu->cpu.r[registers[0]] = result;
+        if (sum > UINT16_MAX) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -536,6 +544,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     case VCPU_INC: 
     {
         uint8_t reg; 
+        uint16_t oldValue;
         if (!instructionFits(vcpu, 2)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -543,7 +552,13 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
+        oldValue = vcpu->cpu.r[reg];
         vcpu->cpu.r[reg]++;
+        if (oldValue == UINT16_MAX) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (vcpu->cpu.r[reg] == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
