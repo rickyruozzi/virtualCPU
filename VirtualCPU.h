@@ -34,6 +34,10 @@ typedef enum VirtualCPUOpcode {
     VCPU_CMP  = 0x42, /* CMP rd, rs */
     VCPU_PUSH = 0x50, /* PUSH rs */
     VCPU_POP  = 0x51  /* POP rd */
+    VCPU_INC = 0x60, /* INC rd */
+    VCPU_DEC = 0x61, /* DEC rd */
+    VCPU_SHL = 0x70, /* SHL rd */
+    VCPU_SHR = 0x71, /* SHR rd */
 } VirtualCPUOpcode;
 
 enum {
@@ -41,6 +45,15 @@ enum {
     VCPU_FLAG_CARRY = 1 << 1,
     VCPU_FLAG_NEGATIVE = 1 << 2
 };
+
+typedef enum ErrorType {
+    ERROR_NONE = 0,
+    ERROR_INVALID_OPCODE,
+    ERROR_MEMORY_ACCESS,
+    ERROR_DIVIDE_BY_ZERO,
+    ERROR_STACK_OVERFLOW,
+    ERROR_STACK_UNDERFLOW
+} ErrorType; 
 
 typedef struct CPU {
     uint16_t r[VCPU_REGISTER_COUNT];
@@ -50,6 +63,7 @@ typedef struct CPU {
     bool littleEndian;
     bool sequential;
     bool halted; 
+    ErrorType error;
 } CPU;
 
 typedef struct Memory {
@@ -67,5 +81,6 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize);
 VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu);
 VirtualCPUStatus runVirtualCPU(VirtualCPU *vcpu, size_t maxSteps);
 void executeProgram(VirtualCPU *vcpu);
+void resetVirtualCPU(VirtualCPU *vcpu);
 
 #endif // VIRTUALCPU_H
