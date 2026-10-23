@@ -7,6 +7,9 @@
 
 #define VCPU_REGISTER_COUNT 8
 #define VCPU_MEMORY_SIZE 4096
+#define VCPU_STACK_SIZE 1024
+#define VCPU_STACK_BASE (VCPU_MEMORY_SIZE - VCPU_STACK_SIZE)
+#define VCPU_STACK_START VCPU_MEMORY_SIZE
 
 typedef enum VirtualCPUStatus {
     VCPU_OK = 0,
@@ -27,17 +30,20 @@ typedef enum VirtualCPUOpcode {
     VCPU_AND  = 0x22, /* AND rd, rs */
     VCPU_OR   = 0x23, /* OR rd, rs */
     VCPU_XOR  = 0x24, /* XOR rd, rs */
-    VCPU_LD   = 0x30, /* LD rd, [addr16] */
-    VCPU_ST   = 0x31, /* ST rs, [addr16] */
+    VCPU_LD   = 0x30, /* LD rd, word [r1:r2] */
+    VCPU_ST   = 0x31, /* ST rs, word [r1:r2] */
+    VCPU_LDA  = 0x32, /* LDA rd, word [addr16] */
+    VCPU_STA  = 0x33, /* STA rs, word [addr16] */
     VCPU_JMP  = 0x40, /* JMP addr16 */
     VCPU_JZ   = 0x41, /* JZ addr16 */
     VCPU_CMP  = 0x42, /* CMP rd, rs */
-    VCPU_PUSH = 0x50, /* PUSH rs */
-    VCPU_POP  = 0x51  /* POP rd */
+    VCPU_PUSH = 0x50, /* PUSH word rs */
+    VCPU_POP  = 0x51, /* POP word rd */
     VCPU_INC = 0x60, /* INC rd */
     VCPU_DEC = 0x61, /* DEC rd */
     VCPU_SHL = 0x70, /* SHL rd */
     VCPU_SHR = 0x71, /* SHR rd */
+    VCPU_NEG = 0x80, /* NEG rd */
 } VirtualCPUOpcode;
 
 enum {
@@ -68,7 +74,7 @@ typedef struct CPU {
 
 typedef struct Memory {
     uint8_t data[VCPU_MEMORY_SIZE];
-    size_t size;
+    size_t size; /* Program size used for instruction fetches. */
 } Memory;
 
 typedef struct VirtualCPU {
@@ -77,6 +83,8 @@ typedef struct VirtualCPU {
 } VirtualCPU;
 
 void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential);
+void getAddressFromRegisters(VirtualCPU *vcpu, uint8_t reg1, uint8_t reg2,
+                             uint16_t *address);
 void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize);
 VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu);
 VirtualCPUStatus runVirtualCPU(VirtualCPU *vcpu, size_t maxSteps);

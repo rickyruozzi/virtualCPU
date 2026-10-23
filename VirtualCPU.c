@@ -19,6 +19,29 @@ static bool validRegisterOperands(const uint8_t *operands, size_t count) {
     return true;
 }
 
+static bool wordFitsDataMemory(uint16_t address) {
+    return (size_t)address + sizeof(uint16_t) <= VCPU_STACK_BASE;
+}
+
+static uint16_t readWord(const VirtualCPU *vcpu, uint16_t address) {
+    if (vcpu->cpu.littleEndian) {
+        return vcpu->memory.data[address] |
+            (uint16_t)(vcpu->memory.data[address + 1] << 8);
+    }
+    return (uint16_t)(vcpu->memory.data[address] << 8) |
+        vcpu->memory.data[address + 1];
+}
+
+static void writeWord(VirtualCPU *vcpu, uint16_t address, uint16_t value) {
+    if (vcpu->cpu.littleEndian) {
+        vcpu->memory.data[address] = (uint8_t)value;
+        vcpu->memory.data[address + 1] = (uint8_t)(value >> 8);
+    } else {
+        vcpu->memory.data[address] = (uint8_t)(value >> 8);
+        vcpu->memory.data[address + 1] = (uint8_t)value;
+    }
+}
+
 static VirtualCPUStatus evaluateError(VirtualCPU *vcpu,
                                       VirtualCPUStatus status,
                                       ErrorType error) {
@@ -34,15 +57,35 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
         vcpu->cpu.r[i] = 0;
     }
     vcpu->cpu.pc = 0;
-    vcpu->cpu.sp = 0;
+    vcpu->cpu.sp = VCPU_STACK_START;
     vcpu->cpu.flags = 0;
     vcpu->cpu.error = ERROR_NONE;
     vcpu->memory.size = 0;
 }
 
+void getAddressFromRegisters(VirtualCPU *vcpu, uint8_t reg1, uint8_t reg2, uint16_t *address) {
+    if (vcpu->cpu.littleEndian) {
+        *address = vcpu->cpu.r[reg1] | (uint16_t)(vcpu->cpu.r[reg2] << 8);
+    } else {
+        *address = (uint16_t)(vcpu->cpu.r[reg1] << 8) | vcpu->cpu.r[reg2];
+    }
+}
+
+static bool getAbsoluteAddress(const VirtualCPU *vcpu, uint16_t pc,
+                               uint16_t *address) {
+    if (vcpu->cpu.littleEndian) {
+        *address = vcpu->memory.data[pc] |
+            (uint16_t)(vcpu->memory.data[pc + 1] << 8);
+    } else {
+        *address = (uint16_t)(vcpu->memory.data[pc] << 8) |
+            vcpu->memory.data[pc + 1];
+    }
+    return wordFitsDataMemory(*address);
+}
+
 void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
-    if (programSize > sizeof(vcpu->memory.data)) {
-        fprintf(stderr, "Program size exceeds memory size\n");
+    if (programSize > VCPU_STACK_BASE) {
+        fprintf(stderr, "Program size exceeds data memory area\n");
         exit(EXIT_FAILURE);
     }
     if (program == NULL) {
@@ -52,6 +95,7 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     memcpy(vcpu->memory.data, program, programSize);
     vcpu->memory.size = programSize;
     vcpu->cpu.pc = 0;
+    vcpu->cpu.sp = VCPU_STACK_START;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
 }
@@ -88,6 +132,16 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
         vcpu->cpu.r[registers[0]] = vcpu->cpu.r[registers[1]];
+        if (vcpu->cpu.r[registers[0]] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[registers[0]] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
         vcpu->cpu.pc += 3;
         return VCPU_OK;
     }
@@ -107,6 +161,16 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             vcpu->cpu.r[reg] = (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 2] << 8) |
                 vcpu->memory.data[vcpu->cpu.pc + 3];
+        }
+        if (vcpu->cpu.r[reg] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
         }
         vcpu->cpu.pc += 4;
         return VCPU_OK;
@@ -253,31 +317,58 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     }
 
     case VCPU_LD: {
-        uint8_t reg;
+        uint8_t registers[3];
         uint16_t address;
         if (!instructionFits(vcpu, 4)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
-        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
-        if (!validRegister(reg)) {
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc + 1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc + 2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc + 3];
+        if (!validRegisterOperands(registers, 3)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if (vcpu->cpu.littleEndian) {
-            address = vcpu->memory.data[vcpu->cpu.pc + 2] |
-                (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
-        } else {
-            address = (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 2] << 8) |
-                vcpu->memory.data[vcpu->cpu.pc + 3];
-        }
-        if ((size_t)address >= vcpu->memory.size) {
+        getAddressFromRegisters(vcpu, registers[1], registers[2], &address);
+        if (!wordFitsDataMemory(address)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
-        vcpu->cpu.r[reg] = vcpu->memory.data[address];
+        vcpu->cpu.r[registers[0]] = readWord(vcpu, address);
+        if (vcpu->cpu.r[registers[0]] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[registers[0]] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
         vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
 
     case VCPU_ST: {
+        uint8_t registers[3];
+        uint16_t address;
+        if (!instructionFits(vcpu, 4)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc + 1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc + 2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc + 3];
+        if (!validRegisterOperands(registers, 3)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        getAddressFromRegisters(vcpu, registers[1], registers[2], &address);
+        if (!wordFitsDataMemory(address)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        writeWord(vcpu, address, vcpu->cpu.r[registers[0]]);
+        vcpu->cpu.pc += 4;
+        return VCPU_OK;
+    }
+
+    case VCPU_LDA: {
         uint8_t reg;
         uint16_t address;
         if (!instructionFits(vcpu, 4)) {
@@ -287,17 +378,38 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if (vcpu->cpu.littleEndian) {
-            address = vcpu->memory.data[vcpu->cpu.pc + 2] |
-                (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
-        } else {
-            address = (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 2] << 8) |
-                vcpu->memory.data[vcpu->cpu.pc + 3];
-        }
-        if ((size_t)address >= vcpu->memory.size) {
+        if (!getAbsoluteAddress(vcpu, vcpu->cpu.pc + 2, &address)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
-        vcpu->memory.data[address] = (uint8_t)vcpu->cpu.r[reg];
+        vcpu->cpu.r[reg] = readWord(vcpu, address);
+        if (vcpu->cpu.r[reg] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
+        return VCPU_OK;
+    }
+
+    case VCPU_STA: {
+        uint8_t reg;
+        uint16_t address;
+        if (!instructionFits(vcpu, 4)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if (!validRegister(reg)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        if (!getAbsoluteAddress(vcpu, vcpu->cpu.pc + 2, &address)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        writeWord(vcpu, address, vcpu->cpu.r[reg]);
         vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
@@ -384,12 +496,11 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if (vcpu->cpu.sp == 0 ||
-            (size_t)(vcpu->cpu.sp - 1) >= sizeof(vcpu->memory.data)) {
+        if (vcpu->cpu.sp < VCPU_STACK_BASE + sizeof(uint16_t)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_STACK_OVERFLOW);
         }
-        vcpu->cpu.sp--;
-        vcpu->memory.data[vcpu->cpu.sp] = (uint8_t)vcpu->cpu.r[reg];
+        vcpu->cpu.sp -= sizeof(uint16_t);
+        writeWord(vcpu, vcpu->cpu.sp, vcpu->cpu.r[reg]);
         vcpu->cpu.pc += 2;
         return VCPU_OK;
     }
@@ -403,12 +514,21 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if ((size_t)vcpu->cpu.sp >= vcpu->memory.size ||
-            (size_t)vcpu->cpu.sp >= sizeof(vcpu->memory.data)) {
+        if (vcpu->cpu.sp >= VCPU_STACK_START) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_STACK_UNDERFLOW);
         }
-        vcpu->cpu.r[reg] = vcpu->memory.data[vcpu->cpu.sp];
-        vcpu->cpu.sp++;
+        vcpu->cpu.r[reg] = readWord(vcpu, vcpu->cpu.sp);
+        if (vcpu->cpu.r[reg] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.sp += sizeof(uint16_t);
         vcpu->cpu.pc += 2;
         return VCPU_OK;
     }
@@ -429,6 +549,11 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
         }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
         vcpu->cpu.pc += 2;
         return VCPU_OK;
     }
@@ -448,6 +573,11 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
         }
         vcpu->cpu.pc += 2;
         return VCPU_OK;
@@ -474,6 +604,11 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
         }
+        if ((vcpu->cpu.r[DestinationReg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
         vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
@@ -499,11 +634,39 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
         }
+        if ((vcpu->cpu.r[DestinationReg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
         vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
 
-    
+    case VCPU_NEG: //NEG   rd
+    {
+        uint8_t reg;
+        if (!instructionFits(vcpu, 1)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc +1];
+        if (!validRegister(reg)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        vcpu->cpu.r[reg] = -vcpu->cpu.r[reg];
+        if (vcpu->cpu.r[reg] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[reg] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 2;
+        return VCPU_OK;
+    }
 
     default:
         return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
@@ -531,7 +694,7 @@ void executeProgram(VirtualCPU *vcpu) {
 
 void resetVirtualCPU(VirtualCPU *vcpu) {
     vcpu->cpu.pc = 0;
-    vcpu->cpu.sp = 0;
+    vcpu->cpu.sp = VCPU_STACK_START;
     vcpu->cpu.flags = 0;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
