@@ -62,6 +62,11 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
     vcpu->cpu.error = ERROR_NONE;
     vcpu->memory.size = 0;
     vcpu->timer = 0;
+    memset(&vcpu->kb, 0, sizeof(vcpu->kb));
+    memset(&vcpu->output, 0, sizeof(vcpu->output));
+    for (int i = 0; i < VCPU_INTERRUPT_COUNT; i++) {
+        vcpu->interruptHandlers[i].handler = NULL;
+    }
 }
 
 void getAddressFromRegisters(VirtualCPU *vcpu, uint8_t reg1, uint8_t reg2, uint16_t *address) {
@@ -126,6 +131,8 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
     vcpu->timer = 0;
+    memset(&vcpu->kb, 0, sizeof(vcpu->kb));
+    memset(&vcpu->output, 0, sizeof(vcpu->output));
 }
 
 void timerTick(VirtualCPU *vcpu) {
@@ -146,11 +153,12 @@ void keyboardInput(VirtualCPU *vcpu, const char* input, size_t length) {
 }
 
 void consoleOutput(VirtualCPU *vcpu) {
-    while(vcpu->kb.count > 0){
-        char c = vcpu->kb.buffer[vcpu->kb.readIndex];
+    while (vcpu->output.count > 0) {
+        char c = vcpu->output.buffer[vcpu->output.readIndex];
         putchar(c);
-        vcpu->kb.readIndex = (vcpu->kb.readIndex + 1) % VCPU_KEYBOARD_BUFFER_SIZE;
-        vcpu->kb.count--;
+        vcpu->output.readIndex =
+            (vcpu->output.readIndex + 1) % VCPU_CONSOLE_BUFFER_SIZE;
+        vcpu->output.count--;
     }
 }
 
@@ -985,6 +993,17 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
         }
+        if (vcpu->cpu.r[registers[0]] == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((vcpu->cpu.r[registers[0]] & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
 
@@ -1068,6 +1087,37 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         } else {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
+        return VCPU_OK;
+    }
+
+    case VCPU_IRET:{ //IRET
+        if(instructionFits(vcpu, 1) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if(vcpu->cpu.sp >= VCPU_STACK_START){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_STACK_UNDERFLOW);
+        }
+        vcpu->cpu.pc = readWord(vcpu, vcpu->cpu.sp);
+        vcpu->cpu.sp += sizeof(uint16_t);
+        return VCPU_OK;
+    }
+
+    case VCPU_STI:{ //STI
+        if(instructionFits(vcpu, 1) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        vcpu->cpu.flags |= VCPU_FLAG_INTERRUPT;
+        vcpu->cpu.pc += 1;
+        return VCPU_OK;
+    }
+
+    case VCPU_CLI:{ //CLI
+        if(instructionFits(vcpu, 1) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_INTERRUPT;
+        vcpu->cpu.pc += 1;
+        return VCPU_OK;
     }
 
     default:
@@ -1100,6 +1150,8 @@ void resetVirtualCPU(VirtualCPU *vcpu) {
     vcpu->cpu.flags = 0;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
+    memset(&vcpu->kb, 0, sizeof(vcpu->kb));
+    memset(&vcpu->output, 0, sizeof(vcpu->output));
     for (int i = 0; i < VCPU_REGISTER_COUNT; i++) {
         vcpu->cpu.r[i] = 0;
     }

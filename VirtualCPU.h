@@ -66,7 +66,8 @@ typedef enum VirtualCPUOpcode {
 enum {
     VCPU_FLAG_ZERO = 1 << 0,
     VCPU_FLAG_CARRY = 1 << 1,
-    VCPU_FLAG_NEGATIVE = 1 << 2
+    VCPU_FLAG_NEGATIVE = 1 << 2,
+    VCPU_FLAG_INTERRUPT = 1 << 3
 };
 
 typedef enum ErrorType {
@@ -90,6 +91,7 @@ typedef struct CPU {
 } CPU;
 
 #define VCPU_KEYBOARD_BUFFER_SIZE 256
+#define VCPU_CONSOLE_BUFFER_SIZE 256
 
 typedef struct keyboard {
     char buffer[VCPU_KEYBOARD_BUFFER_SIZE];
@@ -98,6 +100,14 @@ typedef struct keyboard {
     size_t count; 
     bool overflow;
 } keyboard;
+
+typedef struct console {
+    char buffer[VCPU_CONSOLE_BUFFER_SIZE];
+    size_t readIndex;
+    size_t writeIndex;
+    size_t count;
+    bool overflow;
+} console;
 
 typedef struct Memory {
     uint8_t data[VCPU_MEMORY_SIZE];
@@ -116,6 +126,7 @@ struct VirtualCPU {
     interruptHandler interruptHandlers[VCPU_INTERRUPT_COUNT];
     uint32_t timer;
     keyboard kb; 
+    console output;
 };
 
 
