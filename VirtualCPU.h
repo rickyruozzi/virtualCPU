@@ -16,7 +16,8 @@ typedef enum VirtualCPUStatus {
     VCPU_HALTED,
     VCPU_INVALID_OPCODE,
     VCPU_MEMORY_ERROR,
-    VCPU_STEP_LIMIT
+    VCPU_STEP_LIMIT, 
+    VCPU_DIVIDE_BY_ZERO
 } VirtualCPUStatus;
 
 
@@ -44,6 +45,17 @@ typedef enum VirtualCPUOpcode {
     VCPU_SHL = 0x70, /* SHL rd */
     VCPU_SHR = 0x71, /* SHR rd */
     VCPU_NEG = 0x80, /* NEG rd */
+    VCPU_JNZ = 0x90, /* JNZ addr16 */
+    VCPU_JC  = 0x91, /* JC addr16 */
+    VCPU_JNC = 0x92, /* JNC addr16 */
+    VCPU_JNN = 0x93, /* JNN addr16 */
+    VCPU_JN= 0x94, /* JN addr16 */
+    VCPU_JP = 0x95, /* JP addr16 */
+    VCPU_CALL = 0xA0, /* CALL addr16 */
+    VCPU_RET  = 0xA1, /* RET */
+    VCPU_MUL  = 0xB0, /* MUL rd, rs */
+    VCPU_DIV  = 0xB1, /* DIV rd, rs */
+    VCPU_MOD  = 0xB2, /* MOD rd, rs */
 } VirtualCPUOpcode;
 
 enum {

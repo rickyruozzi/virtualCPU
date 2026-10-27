@@ -214,6 +214,8 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
 
     case VCPU_SUB: {
         uint8_t registers[3];
+        uint16_t left;
+        uint16_t right;
         uint16_t result;
         if (!instructionFits(vcpu, 4)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
@@ -224,8 +226,15 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegisterOperands(registers, 3)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        result = vcpu->cpu.r[registers[1]] - vcpu->cpu.r[registers[2]];
+        left = vcpu->cpu.r[registers[1]];
+        right = vcpu->cpu.r[registers[2]];
+        result = left - right;
         vcpu->cpu.r[registers[0]] = result;
+        if (left < right) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -254,6 +263,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         }
         result = vcpu->cpu.r[registers[1]] & vcpu->cpu.r[registers[2]];
         vcpu->cpu.r[registers[0]] = result;
+        vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -282,6 +292,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         }
         result = vcpu->cpu.r[registers[1]] | vcpu->cpu.r[registers[2]];
         vcpu->cpu.r[registers[0]] = result;
+        vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -310,6 +321,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         }
         result = vcpu->cpu.r[registers[1]] ^ vcpu->cpu.r[registers[2]];
         vcpu->cpu.r[registers[0]] = result;
+        vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -471,6 +483,8 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
 
     case VCPU_CMP: {
         uint8_t registers[2];
+        uint16_t left;
+        uint16_t right;
         uint16_t result;
         if (!instructionFits(vcpu, 3)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
@@ -480,7 +494,14 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegisterOperands(registers, 2)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        result = vcpu->cpu.r[registers[0]] - vcpu->cpu.r[registers[1]];
+        left = vcpu->cpu.r[registers[0]];
+        right = vcpu->cpu.r[registers[1]];
+        result = left - right;
+        if (left < right) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -576,6 +597,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     case VCPU_DEC: 
     {
         uint8_t reg; 
+        uint16_t oldValue;
         if (!instructionFits(vcpu, 2)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -583,7 +605,13 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
+        oldValue = vcpu->cpu.r[reg];
         vcpu->cpu.r[reg]--;
+        if (oldValue == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (vcpu->cpu.r[reg] == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -602,7 +630,9 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     {
         uint8_t DestinationReg;
         uint8_t sourceReg;
-        if (!instructionFits(vcpu, 2)) {
+        uint8_t amount;
+        uint16_t sourceValue;
+        if (!instructionFits(vcpu, 4)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
         DestinationReg = vcpu->memory.data[vcpu->cpu.pc +1];
@@ -613,7 +643,21 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(sourceReg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        vcpu->cpu.r[DestinationReg] = vcpu->cpu.r[sourceReg] << vcpu->memory.data[vcpu->cpu.pc +3];
+        amount = vcpu->memory.data[vcpu->cpu.pc + 3];
+        sourceValue = vcpu->cpu.r[sourceReg];
+        if (amount == 0) {
+            vcpu->cpu.r[DestinationReg] = sourceValue;
+        } else if (amount < 16) {
+            vcpu->cpu.r[DestinationReg] = (uint16_t)(sourceValue << amount);
+            if ((sourceValue & (uint16_t)(1u << (16 - amount))) != 0) {
+                vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+            } else {
+                vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+            }
+        } else {
+            vcpu->cpu.r[DestinationReg] = 0;
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (vcpu->cpu.r[DestinationReg] == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -632,7 +676,9 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     {
         uint8_t DestinationReg;
         uint8_t sourceReg;
-        if (!instructionFits(vcpu, 2)) {
+        uint8_t amount;
+        uint16_t sourceValue;
+        if (!instructionFits(vcpu, 4)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
         DestinationReg = vcpu->memory.data[vcpu->cpu.pc +1];
@@ -643,7 +689,21 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!validRegister(sourceReg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        vcpu->cpu.r[DestinationReg] = vcpu->cpu.r[sourceReg] >> vcpu->memory.data[vcpu->cpu.pc +3];
+        amount = vcpu->memory.data[vcpu->cpu.pc + 3];
+        sourceValue = vcpu->cpu.r[sourceReg];
+        if (amount == 0) {
+            vcpu->cpu.r[DestinationReg] = sourceValue;
+        } else if (amount < 16) {
+            vcpu->cpu.r[DestinationReg] = (uint16_t)(sourceValue >> amount);
+            if ((sourceValue & (uint16_t)(1u << (amount - 1))) != 0) {
+                vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+            } else {
+                vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+            }
+        } else {
+            vcpu->cpu.r[DestinationReg] = 0;
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (vcpu->cpu.r[DestinationReg] == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -661,14 +721,21 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     case VCPU_NEG: //NEG   rd
     {
         uint8_t reg;
-        if (!instructionFits(vcpu, 1)) {
+        uint16_t value;
+        if (!instructionFits(vcpu, 2)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
         reg = vcpu->memory.data[vcpu->cpu.pc +1];
         if (!validRegister(reg)) {
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        vcpu->cpu.r[reg] = -vcpu->cpu.r[reg];
+        value = vcpu->cpu.r[reg];
+        vcpu->cpu.r[reg] = (uint16_t)(-value);
+        if (value != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
         if (vcpu->cpu.r[reg] == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -680,6 +747,226 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
             vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
         }
         vcpu->cpu.pc += 2;
+        return VCPU_OK;
+    }
+
+    case VCPU_JNZ:{ //JNZ   reg, address
+        uint8_t reg;
+        uint16_t address; 
+        if( instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >= vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if(vcpu->cpu.r[reg] != 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_JC:{
+        uint8_t reg; 
+        uint16_t address;
+        if( instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >=  vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if((vcpu->cpu.flags & VCPU_FLAG_CARRY) != 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_JNC:{ //JNC reg, address
+        uint8_t reg;
+        uint16_t address; 
+        if( instructionFits(vcpu, 4) == false){ 
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >= vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if((vcpu->cpu.flags & VCPU_FLAG_CARRY) == 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    } 
+
+    case VCPU_JN: { //JN reg, address
+        uint8_t reg; 
+        uint16_t address; 
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >= vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if((vcpu->cpu.flags & VCPU_FLAG_NEGATIVE) != 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_JNN:{
+        uint8_t reg; 
+        uint16_t address; 
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >= vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if((vcpu->cpu.flags & VCPU_FLAG_NEGATIVE) == 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_JP:{
+        uint8_t reg; 
+        uint16_t address; 
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc + 1];
+        if(!validRegister(reg)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        if((size_t)address >= vcpu->memory.size){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if((vcpu->cpu.flags & VCPU_FLAG_ZERO) == 0){
+            vcpu->cpu.pc = address;
+        } else {
+            vcpu->cpu.pc += 4;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_CALL: { // call address
+        uint16_t address;
+        if (!instructionFits(vcpu, 3)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        address = vcpu->memory.data[vcpu->cpu.pc + 1] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 2] << 8);
+        if((size_t)address >= vcpu->memory.size) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if (vcpu->cpu.sp < VCPU_STACK_BASE + sizeof(uint16_t)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_STACK_OVERFLOW);
+        }
+        vcpu->cpu.sp -= sizeof(uint16_t); //dobbiamo salvare il valore del pc + 3 nello stack, in modo da poter tornare al punto giusto dopo la chiamata
+        writeWord(vcpu, vcpu->cpu.sp, vcpu->cpu.pc + 3);
+        vcpu->cpu.pc = address;
+        return VCPU_OK;
+    }
+
+    case VCPU_RET:{
+        if(instructionFits(vcpu, 1) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        if(vcpu->cpu.sp >= VCPU_STACK_START){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_STACK_UNDERFLOW);
+        }
+        vcpu->cpu.pc = readWord(vcpu, vcpu->cpu.sp);
+        vcpu->cpu.sp += sizeof(uint16_t);
+        return VCPU_OK;
+    }
+
+    case VCPU_MUL:{
+        uint8_t registers[3];
+        uint32_t product; 
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc+1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc+2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc+3];
+        if(!validRegisterOperands(registers, 3)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        product = (uint32_t)vcpu->cpu.r[registers[1]] * (uint32_t)vcpu->cpu.r[registers[2]];
+        vcpu->cpu.r[registers[0]] = (uint16_t)(product & 0xFFFFu);
+        if(product > UINT16_MAX){
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
+        return VCPU_OK;
+    }
+
+    case VCPU_DIV:{
+        uint8_t registers[3];
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc+1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc+2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc+3];
+        if(!validRegisterOperands(registers, 3)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        if(registers[2] == 0){
+            return evaluateError(vcpu, VCPU_DIVIDE_BY_ZERO, ERROR_DIVIDE_BY_ZERO);
+        }
+        vcpu->cpu.r[registers[0]] = registers[1] / registers[2];
+        return VCPU_OK;
+    }
+
+    case VCPU_MOD: {
+        uint8_t registers[3];
+        if(instructionFits(vcpu, 4) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc+1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc+2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc+3];
+        if(!validRegisterOperands(registers, 3)){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        if(registers[2] == 0){
+            return evaluateError(vcpu, VCPU_DIVIDE_BY_ZERO, ERROR_DIVIDE_BY_ZERO);
+        }
+        vcpu->cpu.r[registers[0]] = registers[1] % registers[2];
         return VCPU_OK;
     }
 
