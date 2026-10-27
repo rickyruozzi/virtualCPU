@@ -89,6 +89,15 @@ static bool getAbsoluteAddress(const VirtualCPU *vcpu, uint16_t pc,
     return wordFitsDataMemory(*address);
 }
 
+static uint16_t readInstructionWord(const VirtualCPU *vcpu, uint16_t address) {
+    if (vcpu->cpu.littleEndian) {
+        return vcpu->memory.data[address] |
+            (uint16_t)(vcpu->memory.data[address + 1] << 8);
+    }
+    return (uint16_t)(vcpu->memory.data[address] << 8) |
+        vcpu->memory.data[address + 1];
+}
+
 int findFreeInterruptHandlerSlot(VirtualCPU *vcpu) {
     for (int i = 0; i < VCPU_INTERRUPT_COUNT; i++) {
         if (vcpu->interruptHandlers[i].handler == NULL) {
@@ -822,7 +831,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >= vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -844,7 +853,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >=  vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -866,7 +875,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >= vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -888,7 +897,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >= vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -910,7 +919,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >= vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -932,7 +941,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegister(reg)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 2] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 3] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 2);
         if((size_t)address >= vcpu->memory.size){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -949,7 +958,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if (!instructionFits(vcpu, 3)) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
-        address = vcpu->memory.data[vcpu->cpu.pc + 1] | (uint16_t)(vcpu->memory.data[vcpu->cpu.pc + 2] << 8);
+        address = readInstructionWord(vcpu, vcpu->cpu.pc + 1);
         if((size_t)address >= vcpu->memory.size) {
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
