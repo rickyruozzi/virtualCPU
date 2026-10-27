@@ -61,6 +61,7 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
     vcpu->cpu.flags = 0;
     vcpu->cpu.error = ERROR_NONE;
     vcpu->memory.size = 0;
+    vcpu->timer = 0;
 }
 
 void getAddressFromRegisters(VirtualCPU *vcpu, uint8_t reg1, uint8_t reg2, uint16_t *address) {
@@ -83,6 +84,32 @@ static bool getAbsoluteAddress(const VirtualCPU *vcpu, uint16_t pc,
     return wordFitsDataMemory(*address);
 }
 
+int findFreeInterruptHandlerSlot(VirtualCPU *vcpu) {
+    for (int i = 0; i < VCPU_INTERRUPT_COUNT; i++) {
+        if (vcpu->interruptHandlers[i].handler == NULL) {
+            return i;
+        }
+    }
+    return -1; // No free slot found
+}
+
+void setInterruptHandler(VirtualCPU *vcpu, uint8_t interruptNumber, void (*handler)(VirtualCPU *vcpu)) {
+    if (interruptNumber < VCPU_INTERRUPT_COUNT) {
+        vcpu->interruptHandlers[interruptNumber].handler = handler;
+    } else {
+        fprintf(stderr, "Invalid interrupt number: %u\n", interruptNumber);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void initInterruptHandler(VirtualCPU *vcpu, uint8_t interruptNumber, void (*handler)(VirtualCPU *vcpu)) {
+    if(interruptNumber >= VCPU_INTERRUPT_COUNT) {
+        fprintf(stderr, "Invalid interrupt number: %u\n", interruptNumber);
+        exit(EXIT_FAILURE);
+    }
+    vcpu->interruptHandlers[interruptNumber].handler = handler;
+}
+
 void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     if (programSize > VCPU_STACK_BASE) {
         fprintf(stderr, "Program size exceeds data memory area\n");
@@ -98,6 +125,33 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     vcpu->cpu.sp = VCPU_STACK_START;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
+    vcpu->timer = 0;
+}
+
+void timerTick(VirtualCPU *vcpu) {
+    vcpu->timer++;
+}
+
+void keyboardInput(VirtualCPU *vcpu, const char* input, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (vcpu->kb.count < VCPU_KEYBOARD_BUFFER_SIZE) {
+            vcpu->kb.buffer[vcpu->kb.writeIndex] = input[i];
+            vcpu->kb.writeIndex = (vcpu->kb.writeIndex + 1) % VCPU_KEYBOARD_BUFFER_SIZE;
+            vcpu->kb.count++;
+        } else {
+            vcpu->kb.overflow = true;
+            break; 
+        }
+    }
+}
+
+void consoleOutput(VirtualCPU *vcpu) {
+    while(vcpu->kb.count > 0){
+        char c = vcpu->kb.buffer[vcpu->kb.readIndex];
+        putchar(c);
+        vcpu->kb.readIndex = (vcpu->kb.readIndex + 1) % VCPU_KEYBOARD_BUFFER_SIZE;
+        vcpu->kb.count--;
+    }
 }
 
 VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
@@ -936,6 +990,8 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
 
     case VCPU_DIV:{
         uint8_t registers[3];
+        uint16_t divisor;
+        uint16_t result;
         if(instructionFits(vcpu, 4) == false){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -945,15 +1001,30 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegisterOperands(registers, 3)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if(registers[2] == 0){
+        divisor = vcpu->cpu.r[registers[2]];
+        if(divisor == 0){
             return evaluateError(vcpu, VCPU_DIVIDE_BY_ZERO, ERROR_DIVIDE_BY_ZERO);
         }
-        vcpu->cpu.r[registers[0]] = registers[1] / registers[2];
+        result = vcpu->cpu.r[registers[1]] / divisor;
+        vcpu->cpu.r[registers[0]] = result;
+        if (result == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((result & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
         return VCPU_OK;
     }
 
     case VCPU_MOD: {
         uint8_t registers[3];
+        uint16_t divisor;
+        uint16_t result;
         if(instructionFits(vcpu, 4) == false){
             return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
         }
@@ -963,11 +1034,40 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         if(!validRegisterOperands(registers, 3)){
             return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
         }
-        if(registers[2] == 0){
+        divisor = vcpu->cpu.r[registers[2]];
+        if(divisor == 0){
             return evaluateError(vcpu, VCPU_DIVIDE_BY_ZERO, ERROR_DIVIDE_BY_ZERO);
         }
-        vcpu->cpu.r[registers[0]] = registers[1] % registers[2];
+        result = vcpu->cpu.r[registers[1]] % divisor;
+        vcpu->cpu.r[registers[0]] = result;
+        if (result == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((result & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
         return VCPU_OK;
+    }
+
+    case VCPU_INT:{
+        uint8_t interruptNumber; 
+        if(instructionFits(vcpu, 2) == false){
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        interruptNumber = vcpu->memory.data[vcpu->cpu.pc+1];
+        if(interruptNumber >= VCPU_INTERRUPT_COUNT){
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        if(vcpu->interruptHandlers[interruptNumber].handler != NULL){
+            vcpu->interruptHandlers[interruptNumber].handler(vcpu);
+        } else {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
     }
 
     default:

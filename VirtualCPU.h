@@ -10,6 +10,7 @@
 #define VCPU_STACK_SIZE 1024
 #define VCPU_STACK_BASE (VCPU_MEMORY_SIZE - VCPU_STACK_SIZE)
 #define VCPU_STACK_START VCPU_MEMORY_SIZE
+#define VCPU_INTERRUPT_COUNT 16
 
 typedef enum VirtualCPUStatus {
     VCPU_OK = 0,
@@ -56,6 +57,10 @@ typedef enum VirtualCPUOpcode {
     VCPU_MUL  = 0xB0, /* MUL rd, rs */
     VCPU_DIV  = 0xB1, /* DIV rd, rs */
     VCPU_MOD  = 0xB2, /* MOD rd, rs */
+    VCPU_INT  = 0xC0, /* INT imm8 */
+    VCPU_IRET = 0xC1,  /* IRET */
+    VCPU_CLI = 0xC2, /* CLI */
+    VCPU_STI = 0xC3  /* STI */
 } VirtualCPUOpcode;
 
 enum {
@@ -84,15 +89,36 @@ typedef struct CPU {
     ErrorType error;
 } CPU;
 
+#define VCPU_KEYBOARD_BUFFER_SIZE 256
+
+typedef struct keyboard {
+    char buffer[VCPU_KEYBOARD_BUFFER_SIZE];
+    size_t readIndex;
+    size_t writeIndex;
+    size_t count; 
+    bool overflow;
+} keyboard;
+
 typedef struct Memory {
     uint8_t data[VCPU_MEMORY_SIZE];
     size_t size; /* Program size used for instruction fetches. */
 } Memory;
 
-typedef struct VirtualCPU {
+typedef struct VirtualCPU VirtualCPU;
+
+typedef struct interruptHandler {
+    void (*handler)(VirtualCPU *vcpu);
+} interruptHandler;
+
+struct VirtualCPU {
     CPU cpu;
     Memory memory;
-} VirtualCPU;
+    interruptHandler interruptHandlers[VCPU_INTERRUPT_COUNT];
+    uint32_t timer;
+    keyboard kb; 
+};
+
+
 
 void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential);
 void getAddressFromRegisters(VirtualCPU *vcpu, uint8_t reg1, uint8_t reg2,
@@ -102,5 +128,9 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu);
 VirtualCPUStatus runVirtualCPU(VirtualCPU *vcpu, size_t maxSteps);
 void executeProgram(VirtualCPU *vcpu);
 void resetVirtualCPU(VirtualCPU *vcpu);
+void initInterruptHandler(VirtualCPU *vcpu, uint8_t interruptNumber, void (*handler)(VirtualCPU *vcpu));
+void timerTick(VirtualCPU *vcpu);
+void keyboardInput(VirtualCPU *vcpu, const char* input, size_t length);
+void consoleOutput(VirtualCPU *vcpu);
 
 #endif // VIRTUALCPU_H
