@@ -1528,4 +1528,5 @@ void resetVirtualCPU(VirtualCPU *vcpu) {
     for (int i = 0; i < VCPU_REGISTER_COUNT; i++) {
         vcpu->cpu.r[i] = 0;
     }
+    memset(vcpu->memory.data, 0, sizeof(vcpu->memory.data));
 }
