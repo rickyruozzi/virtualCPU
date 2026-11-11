@@ -28,6 +28,7 @@ int main(void) {
         VCPU_LI, 0, 'A', 'B',
         VCPU_STA, 0, (uint8_t)VCPU_PERIPHERAL_BUFFER_START,
             (uint8_t)(VCPU_PERIPHERAL_BUFFER_START >> 8),
+        VCPU_STI,
         VCPU_HALT
     };
     VirtualCPU vcpu;
@@ -48,7 +49,10 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    waitForDemo(1200);
+    for (size_t tick = 0; tick < 120; tick++) {
+        (void)stepVirtualCPU(&vcpu);
+        waitForDemo(10);
+    }
     stopRefreshThread(&vcpu);
     return EXIT_SUCCESS;
 }

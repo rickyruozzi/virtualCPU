@@ -49,6 +49,10 @@ static void writeWord(VirtualCPU *vcpu, uint16_t address, uint16_t value) {
         vcpu->memory.data[address] = (uint8_t)(value >> 8);
         vcpu->memory.data[address + 1] = (uint8_t)value;
     }
+    if (address < VCPU_REFRESH_BUFFER_END &&
+        (size_t)address + sizeof(uint16_t) > VCPU_REFRESH_BUFFER_START) {
+        atomic_store(&vcpu->videoDirty, true);
+    }
     if (address < VCPU_PERIPHERAL_BUFFER_END &&
         (size_t)address + sizeof(uint16_t) > VCPU_PERIPHERAL_BUFFER_START) {
         atomic_store(&vcpu->peripheralOutputPending, true);
@@ -79,6 +83,9 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
     vcpu->refresh.handler = NULL;
     vcpu->peripheralOutput.handler = NULL;
     atomic_init(&vcpu->peripheralOutputPending, false);
+    atomic_init(&vcpu->videoDirty, false);
+    atomic_init(&vcpu->refreshInterruptPending, false);
+    atomic_init(&vcpu->peripheralInterruptPending, false);
     vcpu->refreshThread = NULL;
     vcpu->refreshThreadLock = NULL;
     vcpu->refreshIntervalMs = 0;
@@ -163,36 +170,43 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     vcpu->timer = 0;
     vcpu->refreshTimer = 0;
     atomic_store(&vcpu->peripheralOutputPending, false);
+    atomic_store(&vcpu->videoDirty, false);
+    atomic_store(&vcpu->refreshInterruptPending, false);
+    atomic_store(&vcpu->peripheralInterruptPending, false);
     memset(&vcpu->kb, 0, sizeof(vcpu->kb));
     memset(&vcpu->output, 0, sizeof(vcpu->output));
 }
 
-/*FLUSSO DI REFRESH:
-1. il timerTick viene chiamato periodicamente dal thread di refresh.
-2. Quando il timer raggiunge il periodo di refresh (VCPU_REFRESH_PERIOD) chiamiamo il gestore di refresh (refresh.handler) se è stato impostato.
-3. Il gestore di refresh riceve il buffer di memoria e la sua dimensione, e può eseguire operazioni di refresh, come aggiornare lo schermo o inviare dati a un dispositivo esterno.
-4. Il thread di refresh continua a chiamare timerTick a intervalli regolari finché il thread è in esecuzione (refreshThreadRunning è true).
-5. Quando il thread di refresh viene fermato, refreshThreadRunning viene impostato su false e il thread termina.
-*/
-
 void timerTick(VirtualCPU *vcpu) {
-    vcpu->timer++; //aggiornamento timer
+    vcpu->timer++;
     vcpu->refreshTimer++;
     if (vcpu->refreshTimer >= VCPU_REFRESH_PERIOD) {
         vcpu->refreshTimer = 0;
-        if (vcpu->refresh.handler != NULL) {
-            vcpu->refresh.handler(
-                vcpu,
-                &vcpu->memory.data[VCPU_REFRESH_BUFFER_START],
-                VCPU_REFRESH_BUFFER_SIZE);
-        }
-        if (vcpu->peripheralOutput.handler != NULL &&
-            atomic_exchange(&vcpu->peripheralOutputPending, false)) {
-            vcpu->peripheralOutput.handler(
-                vcpu,
-                &vcpu->memory.data[VCPU_PERIPHERAL_BUFFER_START],
-                VCPU_PERIPHERAL_BUFFER_SIZE);
-        }
+        atomic_store(&vcpu->refreshInterruptPending, true);
+        atomic_store(&vcpu->peripheralInterruptPending, true);
+    }
+}
+
+static void serviceExternalInterrupts(VirtualCPU *vcpu) {
+    if (atomic_load(&vcpu->refreshInterruptPending) &&
+        atomic_load(&vcpu->videoDirty) &&
+        vcpu->refresh.handler != NULL) {
+        atomic_store(&vcpu->refreshInterruptPending, false);
+        atomic_store(&vcpu->videoDirty, false);
+        vcpu->refresh.handler(
+            vcpu,
+            &vcpu->memory.data[VCPU_REFRESH_BUFFER_START],
+            VCPU_REFRESH_BUFFER_SIZE);
+    }
+    if (atomic_load(&vcpu->peripheralInterruptPending) &&
+        atomic_load(&vcpu->peripheralOutputPending) &&
+        vcpu->peripheralOutput.handler != NULL) {
+        atomic_store(&vcpu->peripheralInterruptPending, false);
+        atomic_store(&vcpu->peripheralOutputPending, false);
+        vcpu->peripheralOutput.handler(
+            vcpu,
+            &vcpu->memory.data[VCPU_PERIPHERAL_BUFFER_START],
+            VCPU_PERIPHERAL_BUFFER_SIZE);
     }
 }
 
@@ -373,6 +387,7 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
     uint8_t opcode;
 
     vcpu->cpu.error = ERROR_NONE;
+    serviceExternalInterrupts(vcpu);
     if (vcpu->cpu.halted) {
         return VCPU_HALTED;
     }
@@ -1503,6 +1518,10 @@ void resetVirtualCPU(VirtualCPU *vcpu) {
     vcpu->cpu.flags = 0;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
+    atomic_store(&vcpu->refreshInterruptPending, false);
+    atomic_store(&vcpu->peripheralInterruptPending, false);
+    atomic_store(&vcpu->videoDirty, false);
+    atomic_store(&vcpu->peripheralOutputPending, false);
     vcpu->refreshTimer = 0;
     memset(&vcpu->kb, 0, sizeof(vcpu->kb));
     memset(&vcpu->output, 0, sizeof(vcpu->output));

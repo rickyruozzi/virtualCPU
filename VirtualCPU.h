@@ -29,6 +29,8 @@
 #define VCPU_PERIPHERAL_BUFFER_END \
     (VCPU_PERIPHERAL_BUFFER_START + VCPU_PERIPHERAL_BUFFER_SIZE)
 #define VCPU_REFRESH_PERIOD 16u
+#define VCPU_INTERRUPT_REFRESH 0u
+#define VCPU_INTERRUPT_PERIPHERAL 1u
 #define VCPU_STACK_BASE    VCPU_MMIO_END //inizio della sezione di stack
 #define VCPU_STACK_START   0xFFFEu //inizio dello stack (top of stack)
 #define VCPU_STACK_SIZE    (VCPU_STACK_START - VCPU_STACK_BASE) //dimensione della sezione di stack
@@ -168,6 +170,9 @@ struct VirtualCPU {
     refreshHandler refresh;
     peripheralHandler peripheralOutput;
     atomic_bool peripheralOutputPending;
+    atomic_bool videoDirty; // true se ci sono nuove scritture nella memoria video
+    atomic_bool refreshInterruptPending;
+    atomic_bool peripheralInterruptPending;
     void *refreshThread;
     void *refreshThreadLock;
     uint32_t refreshIntervalMs;
