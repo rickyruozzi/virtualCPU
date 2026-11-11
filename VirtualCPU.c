@@ -1,5 +1,14 @@
 #include "VirtualCPU.h"
-#include <string.h>
+#include <ctype.h>
+
+#if defined(_WIN32)
+#include <process.h>
+#include <windows.h>
+#else
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+#endif
 
 static bool instructionFits(const VirtualCPU *vcpu, size_t length) {
     return (size_t)vcpu->cpu.pc <= vcpu->memory.size &&
@@ -20,7 +29,7 @@ static bool validRegisterOperands(const uint8_t *operands, size_t count) {
 }
 
 static bool wordFitsDataMemory(uint16_t address) {
-    return (size_t)address + sizeof(uint16_t) <= VCPU_STACK_BASE;
+    return (size_t)address + sizeof(uint16_t) <= VCPU_MMIO_END;
 }
 
 static uint16_t readWord(const VirtualCPU *vcpu, uint16_t address) {
@@ -39,6 +48,10 @@ static void writeWord(VirtualCPU *vcpu, uint16_t address, uint16_t value) {
     } else {
         vcpu->memory.data[address] = (uint8_t)(value >> 8);
         vcpu->memory.data[address + 1] = (uint8_t)value;
+    }
+    if (address < VCPU_PERIPHERAL_BUFFER_END &&
+        (size_t)address + sizeof(uint16_t) > VCPU_PERIPHERAL_BUFFER_START) {
+        atomic_store(&vcpu->peripheralOutputPending, true);
     }
 }
 
@@ -62,6 +75,14 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
     vcpu->cpu.error = ERROR_NONE;
     vcpu->memory.size = 0;
     vcpu->timer = 0;
+    vcpu->refreshTimer = 0;
+    vcpu->refresh.handler = NULL;
+    vcpu->peripheralOutput.handler = NULL;
+    atomic_init(&vcpu->peripheralOutputPending, false);
+    vcpu->refreshThread = NULL;
+    vcpu->refreshThreadLock = NULL;
+    vcpu->refreshIntervalMs = 0;
+    atomic_init(&vcpu->refreshThreadRunning, false);
     memset(&vcpu->kb, 0, sizeof(vcpu->kb));
     memset(&vcpu->output, 0, sizeof(vcpu->output));
     for (int i = 0; i < VCPU_INTERRUPT_COUNT; i++) {
@@ -125,8 +146,8 @@ void initInterruptHandler(VirtualCPU *vcpu, uint8_t interruptNumber, void (*hand
 }
 
 void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
-    if (programSize > VCPU_STACK_BASE) {
-        fprintf(stderr, "Program size exceeds data memory area\n");
+    if (programSize > VCPU_HEAP_START - VCPU_PROGRAM_START) {
+        fprintf(stderr, "Program size exceeds program memory area\n");
         exit(EXIT_FAILURE);
     }
     if (program == NULL) {
@@ -140,12 +161,183 @@ void loadProgram(VirtualCPU *vcpu, const uint8_t *program, size_t programSize) {
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
     vcpu->timer = 0;
+    vcpu->refreshTimer = 0;
+    atomic_store(&vcpu->peripheralOutputPending, false);
     memset(&vcpu->kb, 0, sizeof(vcpu->kb));
     memset(&vcpu->output, 0, sizeof(vcpu->output));
 }
 
+/*FLUSSO DI REFRESH:
+1. il timerTick viene chiamato periodicamente dal thread di refresh.
+2. Quando il timer raggiunge il periodo di refresh (VCPU_REFRESH_PERIOD) chiamiamo il gestore di refresh (refresh.handler) se è stato impostato.
+3. Il gestore di refresh riceve il buffer di memoria e la sua dimensione, e può eseguire operazioni di refresh, come aggiornare lo schermo o inviare dati a un dispositivo esterno.
+4. Il thread di refresh continua a chiamare timerTick a intervalli regolari finché il thread è in esecuzione (refreshThreadRunning è true).
+5. Quando il thread di refresh viene fermato, refreshThreadRunning viene impostato su false e il thread termina.
+*/
+
 void timerTick(VirtualCPU *vcpu) {
-    vcpu->timer++;
+    vcpu->timer++; //aggiornamento timer
+    vcpu->refreshTimer++;
+    if (vcpu->refreshTimer >= VCPU_REFRESH_PERIOD) {
+        vcpu->refreshTimer = 0;
+        if (vcpu->refresh.handler != NULL) {
+            vcpu->refresh.handler(
+                vcpu,
+                &vcpu->memory.data[VCPU_REFRESH_BUFFER_START],
+                VCPU_REFRESH_BUFFER_SIZE);
+        }
+        if (vcpu->peripheralOutput.handler != NULL &&
+            atomic_exchange(&vcpu->peripheralOutputPending, false)) {
+            vcpu->peripheralOutput.handler(
+                vcpu,
+                &vcpu->memory.data[VCPU_PERIPHERAL_BUFFER_START],
+                VCPU_PERIPHERAL_BUFFER_SIZE);
+        }
+    }
+}
+
+void initRefreshHandler(
+    VirtualCPU *vcpu,
+    void (*handler)(VirtualCPU *vcpu, const uint8_t *buffer, size_t size)) {
+    vcpu->refresh.handler = handler;
+}
+
+void initPeripheralOutputHandler(
+    VirtualCPU *vcpu,
+    void (*handler)(VirtualCPU *vcpu, const uint8_t *buffer, size_t size)) {
+    vcpu->peripheralOutput.handler = handler;
+}
+
+void sendPeripheralBufferToConsole(
+    VirtualCPU *vcpu, const uint8_t *buffer, size_t size) {
+    size_t outputSize;
+
+    (void)vcpu;
+    if (buffer == NULL || size == 0) {
+        return;
+    }
+
+    outputSize = size;
+    if (outputSize > VCPU_PERIPHERAL_BUFFER_SIZE) {
+        outputSize = VCPU_PERIPHERAL_BUFFER_SIZE;
+    }
+
+    fputs("Peripheral output:", stdout);
+    for (size_t index = 0; index < outputSize; index++) {
+        if (index % 16u == 0) {
+            fputs("\n", stdout);
+        }
+        printf("%02X ", buffer[index]);
+    }
+    fputs("\n", stdout);
+    fflush(stdout);
+}
+
+static void waitRefreshInterval(uint32_t intervalMs) {
+#if defined(_WIN32)
+    Sleep(intervalMs);
+#else
+    struct timespec delay;
+    delay.tv_sec = intervalMs / 1000u;
+    delay.tv_nsec = (long)(intervalMs % 1000u) * 1000000L;
+    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+    }
+#endif
+}
+
+#if defined(_WIN32)
+static unsigned __stdcall refreshThreadMain(void *argument) {
+#else
+static void *refreshThreadMain(void *argument) {
+#endif
+    VirtualCPU *vcpu = (VirtualCPU *)argument;
+
+    while (atomic_load(&vcpu->refreshThreadRunning)) {
+        waitRefreshInterval(vcpu->refreshIntervalMs);
+        if (atomic_load(&vcpu->refreshThreadRunning)) {
+            timerTick(vcpu);
+        }
+    }
+#if defined(_WIN32)
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+bool startRefreshThread(VirtualCPU *vcpu, uint32_t intervalMs) {
+    if (vcpu == NULL || vcpu->refresh.handler == NULL || intervalMs == 0 ||
+        atomic_load(&vcpu->refreshThreadRunning)) {
+        return false;
+    }
+    vcpu->refreshIntervalMs = intervalMs;
+    atomic_store(&vcpu->refreshThreadRunning, true);
+#if defined(_WIN32)
+    vcpu->refreshThread = (void *)_beginthreadex(
+        NULL, 0, refreshThreadMain, vcpu, 0, NULL);
+    if (vcpu->refreshThread == NULL) {
+        atomic_store(&vcpu->refreshThreadRunning, false);
+        return false;
+    }
+#else
+    {
+        pthread_t *thread = malloc(sizeof(*thread));
+        if (thread == NULL ||
+            pthread_create(thread, NULL, refreshThreadMain, vcpu) != 0) {
+            free(thread);
+            atomic_store(&vcpu->refreshThreadRunning, false);
+            return false;
+        }
+        vcpu->refreshThread = thread;
+    }
+#endif
+    return true;
+}
+
+void stopRefreshThread(VirtualCPU *vcpu) {
+    if (vcpu == NULL || !atomic_load(&vcpu->refreshThreadRunning)) {
+        return;
+    }
+    atomic_store(&vcpu->refreshThreadRunning, false);
+#if defined(_WIN32)
+    WaitForSingleObject((HANDLE)vcpu->refreshThread, INFINITE);
+    CloseHandle((HANDLE)vcpu->refreshThread);
+#else
+    {
+        pthread_t *thread = (pthread_t *)vcpu->refreshThread;
+        pthread_join(*thread, NULL);
+        free(thread);
+    }
+#endif
+    vcpu->refreshThread = NULL;
+}
+
+void refreshVideoBufferToConsole(
+    VirtualCPU *vcpu, const uint8_t *buffer, size_t size) {
+    size_t displaySize;
+
+    (void)vcpu;
+    if (buffer == NULL || size == 0) {
+        return;
+    }
+
+    displaySize = size;
+    if (displaySize > VCPU_REFRESH_BUFFER_SIZE) {
+        displaySize = VCPU_REFRESH_BUFFER_SIZE;
+    }
+
+    printf("\033[H\033[2J");
+    for (size_t index = 0; index < displaySize; index++) {
+        uint8_t value = buffer[index];
+        putchar(value != 0 && isprint(value) ? (int)value : ' ');
+        if ((index + 1) % VCPU_VIDEO_WIDTH == 0) {
+            putchar('\n');
+        }
+    }
+    if (displaySize % VCPU_VIDEO_WIDTH != 0) {
+        putchar('\n');
+    }
+    fflush(stdout);
 }
 
 void keyboardInput(VirtualCPU *vcpu, const char* input, size_t length) {
@@ -168,6 +360,12 @@ void consoleOutput(VirtualCPU *vcpu) {
         vcpu->output.readIndex =
             (vcpu->output.readIndex + 1) % VCPU_CONSOLE_BUFFER_SIZE;
         vcpu->output.count--;
+    }
+}
+
+void saveRegistersToMemory(VirtualCPU *vcpu, uint16_t address){
+    for(int i=0; i<VCPU_REGISTER_COUNT; i++){
+        writeWord(vcpu, address + i * sizeof(uint16_t), vcpu->cpu.r[i]);
     }
 }
 
@@ -393,6 +591,94 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         result = vcpu->cpu.r[registers[1]] ^ vcpu->cpu.r[registers[2]];
         vcpu->cpu.r[registers[0]] = result;
         vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        if (result == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((result & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
+        return VCPU_OK;
+    }
+
+    case VCPU_ANDI:
+    case VCPU_ORI:
+    case VCPU_XORI: {
+        uint8_t registers[2];
+        uint16_t immediate;
+        uint16_t result;
+        if (!instructionFits(vcpu, 4)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc + 1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc + 2];
+        if (!validRegisterOperands(registers, 2)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        immediate = readInstructionWord(vcpu, vcpu->cpu.pc + 3);
+        if (opcode == VCPU_ANDI) {
+            result = vcpu->cpu.r[registers[1]] & immediate;
+        } else if (opcode == VCPU_ORI) {
+            result = vcpu->cpu.r[registers[1]] | immediate;
+        } else {
+            result = vcpu->cpu.r[registers[1]] ^ immediate;
+        }
+        vcpu->cpu.r[registers[0]] = result;
+        vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        if (result == 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_ZERO;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_ZERO;
+        }
+        if ((result & 0x8000u) != 0) {
+            vcpu->cpu.flags |= VCPU_FLAG_NEGATIVE;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_NEGATIVE;
+        }
+        vcpu->cpu.pc += 4;
+        return VCPU_OK;
+    }
+
+    case VCPU_ADC:
+    case VCPU_SBB: {
+        uint8_t registers[3];
+        uint16_t left;
+        uint16_t right;
+        uint16_t result;
+        uint32_t carryIn = (vcpu->cpu.flags & VCPU_FLAG_CARRY) != 0;
+        uint32_t calculation;
+        if (!instructionFits(vcpu, 4)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        registers[0] = vcpu->memory.data[vcpu->cpu.pc + 1];
+        registers[1] = vcpu->memory.data[vcpu->cpu.pc + 2];
+        registers[2] = vcpu->memory.data[vcpu->cpu.pc + 3];
+        if (!validRegisterOperands(registers, 3)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        left = vcpu->cpu.r[registers[1]];
+        right = vcpu->cpu.r[registers[2]];
+        if (opcode == VCPU_ADC) {
+            calculation = (uint32_t)left + right + carryIn;
+            result = (uint16_t)calculation;
+            if (calculation > UINT16_MAX) {
+                vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+            } else {
+                vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+            }
+        } else {
+            result = (uint16_t)(left - right - carryIn);
+            if ((uint32_t)left < (uint32_t)right + carryIn) {
+                vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+            } else {
+                vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+            }
+        }
+        vcpu->cpu.r[registers[0]] = result;
         if (result == 0) {
             vcpu->cpu.flags |= VCPU_FLAG_ZERO;
         } else {
@@ -1129,6 +1415,64 @@ VirtualCPUStatus stepVirtualCPU(VirtualCPU *vcpu) {
         return VCPU_OK;
     }
 
+    case VCPU_ROL: {
+        uint8_t reg;
+        uint16_t value;
+        if(!instructionFits(vcpu, 2)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc+1];
+        if(!validRegister(reg)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        value = vcpu->cpu.r[reg];
+        int lastBit = (value & 0x8000u) != 0 ? 1 : 0;
+        vcpu->cpu.r[reg] = (uint16_t)((value << 1) | lastBit);
+        if(lastBit) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
+        vcpu->cpu.pc += 2;
+        return VCPU_OK;
+    }
+
+    case VCPU_ROR:{
+        uint16_t reg;
+        uint16_t value;
+        if(!instructionFits(vcpu, 2)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc+1];
+        if(!validRegister(reg)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        value = vcpu->cpu.r[reg];
+        int firstBit = (value & 0x0001u) != 0 ? 1 : 0;
+        vcpu->cpu.r[reg] = (uint16_t)((value >> 1) | (firstBit << 15));
+        if(firstBit) {
+            vcpu->cpu.flags |= VCPU_FLAG_CARRY;
+        } else {
+            vcpu->cpu.flags &= (uint8_t)~VCPU_FLAG_CARRY;
+        }
+        vcpu->cpu.pc += 2;
+        return VCPU_OK;
+    }
+
+    case VCPU_NOT:{
+        uint8_t reg;
+        if(!instructionFits(vcpu, 2)) {
+            return evaluateError(vcpu, VCPU_MEMORY_ERROR, ERROR_MEMORY_ACCESS);
+        }
+        reg = vcpu->memory.data[vcpu->cpu.pc+1];
+        if(!validRegister(reg)) {
+            return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
+        }
+        vcpu->cpu.r[reg] = (uint16_t)~vcpu->cpu.r[reg];
+        vcpu->cpu.pc += 2;
+        return VCPU_OK;
+    }
+
     default:
         return evaluateError(vcpu, VCPU_INVALID_OPCODE, ERROR_INVALID_OPCODE);
     }
@@ -1159,6 +1503,7 @@ void resetVirtualCPU(VirtualCPU *vcpu) {
     vcpu->cpu.flags = 0;
     vcpu->cpu.halted = false;
     vcpu->cpu.error = ERROR_NONE;
+    vcpu->refreshTimer = 0;
     memset(&vcpu->kb, 0, sizeof(vcpu->kb));
     memset(&vcpu->output, 0, sizeof(vcpu->output));
     for (int i = 0; i < VCPU_REGISTER_COUNT; i++) {
