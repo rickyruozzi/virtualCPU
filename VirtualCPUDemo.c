@@ -1,10 +1,15 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "VirtualCPU.h"
 #include <signal.h>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
-#include <unistd.h>
+#include <errno.h>
+#include <time.h>
 #endif
 
 static volatile sig_atomic_t keepRunning = 1;
@@ -18,7 +23,13 @@ static void waitForDemo(uint32_t milliseconds) {
 #if defined(_WIN32)
     Sleep(milliseconds);
 #else
-    usleep(milliseconds * 1000u);
+    {
+        struct timespec delay;
+        delay.tv_sec = (time_t)(milliseconds / 1000u);
+        delay.tv_nsec = (long)((milliseconds % 1000u) * 1000000u);
+        while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+        }
+    }
 #endif
 }
 
