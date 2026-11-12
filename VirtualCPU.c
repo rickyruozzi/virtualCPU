@@ -77,6 +77,7 @@ void initVirtualCPU(VirtualCPU *vcpu, bool littleEndian, bool sequential) {
     vcpu->cpu.sp = VCPU_STACK_START;
     vcpu->cpu.flags = 0;
     vcpu->cpu.error = ERROR_NONE;
+    vcpu->cpu.symbolCount = 0;
     vcpu->memory.size = 0;
     vcpu->timer = 0;
     vcpu->refreshTimer = 0;
@@ -1529,4 +1530,42 @@ void resetVirtualCPU(VirtualCPU *vcpu) {
         vcpu->cpu.r[i] = 0;
     }
     memset(vcpu->memory.data, 0, sizeof(vcpu->memory.data));
+}
+
+bool createSymbol(VirtualCPU *vcpu, uint16_t address, const char *name) {
+    size_t nameLength;
+
+    if (vcpu == NULL || name == NULL || name[0] == '\0') {
+        return false;
+    }
+    nameLength = strlen(name);
+    if (nameLength >= VCPU_SYMBOL_NAME_SIZE ||
+        vcpu->cpu.symbolCount >= VCPU_MAX_SYMBOLS) {
+        return false;
+    }
+
+    for (size_t i = 0; i < vcpu->cpu.symbolCount; i++) {
+        if (strcmp(vcpu->cpu.symbolTable[i].name, name) == 0) {
+            return false;
+        }
+    }
+
+    memcpy(vcpu->cpu.symbolTable[vcpu->cpu.symbolCount].name,
+           name, nameLength + 1);
+    vcpu->cpu.symbolTable[vcpu->cpu.symbolCount].address = address;
+    vcpu->cpu.symbolCount++;
+    return true;
+}
+
+uint16_t getSymbolAddress(VirtualCPU *vcpu, const char *name) {
+    if (vcpu == NULL || name == NULL) {
+        return UINT16_MAX;
+    }
+
+    for (size_t i = 0; i < vcpu->cpu.symbolCount; i++) {
+        if (strcmp(vcpu->cpu.symbolTable[i].name, name) == 0) {
+            return vcpu->cpu.symbolTable[i].address;
+        }
+    }
+    return UINT16_MAX;
 }

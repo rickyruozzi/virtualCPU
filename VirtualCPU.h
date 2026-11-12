@@ -36,6 +36,8 @@
 #define VCPU_STACK_SIZE    (VCPU_STACK_START - VCPU_STACK_BASE) //dimensione della sezione di stack
 #define VCPU_HEAP_END      VCPU_MMIO_START //fine della sezione heap
 #define VCPU_INTERRUPT_COUNT 16 //numero massimo di interrupt gestibili
+#define VCPU_MAX_SYMBOLS 256
+#define VCPU_SYMBOL_NAME_SIZE 32
 
 typedef enum VirtualCPUStatus {
     VCPU_OK = 0,
@@ -96,6 +98,12 @@ typedef enum VirtualCPUOpcode {
     VCPU_NOT = 0xD2, /* NOT rd */
 } VirtualCPUOpcode;
 
+
+typedef struct Symbol {
+    uint16_t address;
+    char name[VCPU_SYMBOL_NAME_SIZE];
+} Symbol;
+
 enum {
     VCPU_FLAG_ZERO = 1 << 0,
     VCPU_FLAG_CARRY = 1 << 1,
@@ -121,6 +129,8 @@ typedef struct CPU {
     bool sequential;
     bool halted; 
     ErrorType error;
+    Symbol symbolTable[VCPU_MAX_SYMBOLS];
+    size_t symbolCount;
 } CPU;
 
 #define VCPU_KEYBOARD_BUFFER_SIZE 256
@@ -207,5 +217,7 @@ void sendPeripheralBufferToConsole(
     VirtualCPU *vcpu, const uint8_t *buffer, size_t size);
 void keyboardInput(VirtualCPU *vcpu, const char* input, size_t length);
 void consoleOutput(VirtualCPU *vcpu);
+bool createSymbol(VirtualCPU *vcpu, uint16_t address, const char *name);
+uint16_t getSymbolAddress(VirtualCPU *vcpu, const char* name);
 
 #endif // VIRTUALCPU_H
